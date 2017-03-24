@@ -2,8 +2,11 @@ package metaphonebr
 
 import (
 //   "fmt"
+   "errors"
    "regexp"
    "strings"
+   "github.com/arbovm/levenshtein"
+   "github.com/luisfurquim/goose"
 )
 
 type NameT struct {
@@ -25,6 +28,21 @@ var repAccent *strings.Replacer
 var reWord *regexp.Regexp
 
 var Verbose bool = true
+
+var LevThreshold float32 = .5 // Margem percentual para considerar dois metaphones (MTFs) similares usando levenshtein - 1 (min == 1). Vide func IsSim(...)
+
+var Goose goose.Alert
+
+var preps map[string]bool = map[string]bool{
+   "DE": true,
+   "DO": true,
+   "DA": true,
+   "DOS": true,
+   "DAS": true,
+}
+
+var ErrInvalidName = errors.New("Invalid name")
+
 
 func (n NameT) String() string {
    var s string
@@ -643,6 +661,108 @@ func Parse(nm string) *NameT {
    }
 //   fmt.Printf("%#v",ret)
    return &ret
+}
+
+
+func IsSim(mtf1, mtf2 string) bool {
+   var margem int
+
+   // margem = min(|mtf1|, |mtf2|)
+   margem = len(mtf1)
+   if margem > len(mtf2) {
+      margem = len(mtf2)
+   }
+
+   margem-- // margem > 1 somente se ambos os MTFs tiverem pelo menos 5 caracteres...
+   margem = int(LevThreshold * float32(margem))
+   if margem < 1 {
+      margem = 1
+   }
+
+   if levenshtein.Distance(mtf1, mtf2) <= margem {
+      return true
+   }
+   return false
+}
+
+
+func WordSim(w1, w2 string) float32 {
+   var maxsz float32
+
+   if len(w1) < len(w2) {
+      maxsz = float32(len(w2))
+   } else {
+      maxsz = float32(len(w1))
+   }
+
+   return 1.0 - (float32(levenshtein.Distance(w1,w2)) / maxsz)
+}
+
+func (n NameT) SimString(name string) (float32, error) {
+   var pes2              *NameT
+
+   pes2 = Parse(name)
+   if pes2 == nil {
+      return -1, ErrInvalidName
+   }
+
+   return n.Sim(pes2)
+}
+
+func (n NameT) Sim(pes2 *NameT) (float32, error) {
+   var i, j, pos          int
+   var mtf1, mtf2         string
+   var sim, simtotal      float32
+   var matches            int
+   var qtPrep, qtPrep2    int
+//   var err                error
+
+   simtotal = 1.0
+
+   for i, mtf1 = range n.Mtfs {
+      if qtPrep2>0 {
+         Goose.Logf(4,"DROP qtPrep2: %d\n",qtPrep2)
+         qtPrep2 = 0
+      }
+      if preps[n.Words[i]] {
+         qtPrep++
+         Goose.Logf(4,"qtPrep: %d",qtPrep)
+         continue
+      }
+      sim = 0.0
+
+      for j = pos; j < len(pes2.Mtfs); j++ {
+         if preps[pes2.Words[j]] {
+            qtPrep2++
+            continue
+         }
+         mtf2 = pes2.Mtfs[j]
+         if mtf1==mtf2 {
+            sim = WordSim(n.Words[i],pes2.Words[j])
+            break
+         } else if IsSim(mtf1, mtf2) {
+            sim = WordSim(n.Words[i],pes2.Words[j])
+            break
+         }
+      }
+      if sim > 0.0 {
+         Goose.Logf(4,"Match %f, i:%d, j:%d, pos=%d, newpos=%d",sim,i,j,pos,j+1)
+         simtotal *= sim
+//         fmt.Printf("Sim: %f, Total: %f\n",sim,simtotal)
+         matches++
+         pos = j + 1
+         if qtPrep2>0 {
+            Goose.Logf(4,"Adding qtprep2: %d",qtPrep2)
+            qtPrep += qtPrep2
+            Goose.Logf(4,"ACC qtPrep2: %d\n",qtPrep2)
+         }
+      }
+   }
+   Goose.Logf(4,"Matches: %d, len1:%d, len2:%d\n",matches,len(n.Words),len(pes2.Words))
+   Goose.Logf(4,"qtPrep: %d\n",qtPrep)
+   sim = simtotal * (2.0*float32(matches)/float32(len(n.Words)+len(pes2.Words)-qtPrep))
+   Goose.Logf(4,"%f: %s x %s\n",sim,n,pes2)
+   return sim, nil
 }
 
 
